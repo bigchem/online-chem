@@ -9,6 +9,7 @@ Generation of new putative Mdmx inhibitors from scratch based on Recurrent Neura
 * Theano for numerical computation https://theano.readthedocs.io/en/0.8.x
 * Lasagne library with deep-learning primitives for Theano https://lasagne.readthedocs.io/en/latest
 * AutoDock Vina for molecular docking http://vina.scripps.edu
+* Lilly Medchem rules for reactivity filtering https://github.com/IanAWatson/Lilly-Medchem-Rules
 
 # Description of files
 
