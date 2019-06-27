@@ -5,7 +5,6 @@ import lasagne
 import sys
 
 N_HIDDEN = 512
-LEARNING_RATE = .01
 GRAD_CLIP = 100
 NUM_EPOCHS = 50
 
@@ -23,14 +22,18 @@ class RnnModel:
       self.end_seq = self.char_to_ix["$"];
 
       self.Temperature = 0;
+      self.lr = theano.shared(np.array(0.01, dtype=theano.config.floatX));
 
       self.pred, self.train, self.valid, self.params = \
            self.buildRecurrentNetwork(file_weights);
 
+   def setLearningRate(self, lr):
+       self.lr = lr;
+
    def generate(self, bait):
 
-      max_length = 300;
-      batch_size = 8;
+      max_length = 100;
+      batch_size = 16;
 
       yt = np.zeros((batch_size, max_length, self.vocab_size), np.int8);
       mt = np.zeros((batch_size, max_length), np.int8);
@@ -40,8 +43,9 @@ class RnnModel:
          mt[:, i] = 1;
 
       for y in range(len(bait), max_length):
-         n = self.pred(yt, mt);
-         p = n[: , y, :];
+
+         n = self.pred(yt[:,:y,:], mt);
+         p = n[: , -1, :];
          mt[:, y] = 1;
 
          for batch in range(batch_size):
@@ -138,7 +142,7 @@ class RnnModel:
       all_params = lasagne.layers.get_all_params(l_out,trainable=True)
 
       print("Computing updates ...")
-      updates = lasagne.updates.adagrad(cost, all_params, LEARNING_RATE)
+      updates = lasagne.updates.adagrad(cost, all_params, self.lr)
 
       print("Compiling functions ...")
       train = theano.function([X, M, Y], cost, updates=updates, allow_input_downcast=True)
@@ -158,7 +162,7 @@ class RnnModel:
 
       #11% of the whole data for validation
       TV = 0.11;
-      num_epochs = 5;
+      num_epochs = 10;
 
       total = len(data);
       tv = int(TV * total);

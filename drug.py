@@ -1,9 +1,9 @@
 '''
-   Drug Search program: recurrent neural networks
-   and molecular docking.
+   Drug Search program: recurrent neural networks,
+   monte-carlo search trees and molecular docking.
 
    Helmholtz-Zentrum Munchen, STB
-   P. Karpov, I. Tetko, 2018
+   P. Karpov, I. Tetko, 2018-2019
 
    carpovpv@gmail.com
 '''
@@ -21,7 +21,7 @@ from rdkit import Chem
 def main():
 
    if len(sys.argv) != 2:
-       print("Usage: ", sys.argv[0], " file-with-original-smiles.");
+       print("Usage: ", sys.argv[0], " molecules.smi");
        return;
 
    print("Starting the program.");
@@ -30,8 +30,9 @@ def main():
    ActiveMols = sys.argv[1];
 
    print("Loading active molecules: ", ActiveMols);
+   print("Loading the vocabulary.");
 
-   chars = "$#%()+-./0123456789=@ABCFGHIKLMNOPRSTVXZ[\]abcdegilnoprstu^";
+   chars = open('data/chars.txt', 'r').read()[:-1];
    chars = sorted(set(chars))
 
    print("Loading and building RNN functions.");
@@ -40,22 +41,26 @@ def main():
    print("Loading filters.");
    filters = [];
 
-   #here we used only a Lipinski-like filter (MW < 700)
-   filters.append( cf.LipinskiFilter() );
+   ic50 = cf.IC50Filter();
 
-   #docking filter uses parallel docking on differen machines,
-   #so it loads separately from other filters.
+   filters.append( cf.LipinskiFilter() );
+   filters.append( cf.LillyFilter() );
+   filters.append( cf.PainsFilter() );
+   filters.append( ic50 );
+
    bm = cf.VinaFilter();
 
    print("Loading and preparing the database.");
    db = moldb.MolDb();
 
+   cnt = 0;
    #load our actives
    #dont check uniqness. This allows to increase the training dataset.
-   cnt = 0;
+
    with open(ActiveMols) as f:
       lines = f.readlines();
       for line in lines:
+         line = line.strip();
          m, canon = cf.checkSmile(line);
          if(m is not None):
             db.addMol(canon, line);
@@ -63,26 +68,21 @@ def main():
 
    print("Loaded {} molecules.".format(cnt));
 
-
    temp_mols = [];
-   #the generation clear our temporary table with smiles
    def rnn_before():
       temp_mols.clear();
 
-   #after we calculated all scoring values
-   #we simple add favourable molecules to the database
    def rnn_after(cycle):
-      print("After docking:");
       print(temp_mols);
       cnt = 0;
       for k in temp_mols:
-         if(k[0] == True and len(k) == 5):
+         if(k[0] == True and len(k) == 6):
             idx = db.addMol(k[1], k[3], True, cycle, k[2]);
-            db.updateTargetValue(idx, k[4]);
+            db.updateTargetValue(idx, k[4], k[5]);
       return;
 
-   #generate a set of smiles from scratch
-   #or starting with a particular fragment
+   #apply state in the MC workflow
+   #the function returns the score
    def rnn_generate(x):
       bait = "^";
       bait += x;
@@ -91,7 +91,10 @@ def main():
       score = 0.0;
       raw = rnn.generate(x);
 
+      print("Generated: ", raw);
+
       new_mols = [];
+
       for line in raw:
          m, canon = cf.checkSmile(line);
          if(m is not None):
@@ -107,83 +110,88 @@ def main():
                 continue;
 
             idx, oldscore, oldhits = db.search(canon);
-            #1 found in actives, 2 found in inactives, 0 not found at all
+
             if(idx == 1 or idx == 2):
                continue;
 
             allow = True;
+
             try:
+
                for fl in filters:
-                  if(fl.calcScore(m) == False):
+                  if(fl.calcScore(m, canon) == False):
                      allow = False;
                      break;
             except:
                print("Exception. Continue.", sys.exc_info()[0]);
 
             if allow == True:
-                new_mols.append ( [m, canon, line] );
+                new_mols.append ( [m, canon, line, ic50.value] );
 
       if len(new_mols):
 
           bm.calcScore(new_mols);
           print("After docking:");
 
-          #docking filter adds the VINA score to the end of the list on 3 position
           for idx in range(len(new_mols)):
-             if(len(new_mols[idx]) > 3):
-                temp_mols.append([True, new_mols[idx][1], new_mols[idx][3], new_mols[idx][2], new_mols[idx][3]]);
+             if(len(new_mols[idx]) > 4):
+                temp_mols.append([True, new_mols[idx][1], new_mols[idx][3], new_mols[idx][2], new_mols[idx][4], new_mols[idx][3]]);
+
    #end rnn_generate_function
 
-   #loop: training -> generation -> filtering and docking -> new data
    max_cycle = 10;
+   mtree_max = 1000;
 
-   #max_attempts must be sufficiently large to sample enough molecules with
-   #high VINA scores. This new set will be used for further training of the Generator.
-   max_attempts = 10;
-
+   ##!!!
    for cycle in range(1, max_cycle + 1):
 
       print("=======CYCLE {} =======".format(cycle));
 
-      pretrain_without_improvement = 0;
-      max_trials = 3;
+      if cycle > 0:
+         pretrain_without_improvement = 0;
+         max_trials = 3;
 
-      for pretrain in range(1, max_trials):
+         for pretrain in range(1, max_trials):
 
-         data = db.selectMols();
-         vals = rnn.fineTune(data);
+            data = db.selectMols();
 
-         id_min = np.argmin(vals);
-         if(id_min == 0):
-            pretrain_without_improvement += 1;
-            print("Nothing improved after training. Step: {}".format(pretrain_without_improvement));
-         else:
-            break;
+            #every cycle decrease the learning rate
+            lr = 0.01 * math.exp(-(cycle -1.0) / 4.0);
+            rnn.setLearningRate(lr);
 
-      sys.stdout.flush();
+            #train the model on new data
+            vals = rnn.fineTune(data);
 
-      if(pretrain_without_improvement >= max_trials):
-         print("Stop training. No improvement.");
+            id_min = np.argmin(vals);
+            if(id_min == 0):
+               pretrain_without_improvement += 1;
+               print("Nothing improved after training. Step: {}".format(pretrain_without_improvement));
+            else:
+               break;
 
-      #save validation erros for the future analysis in epochs table.
-      db.updateLearning(cycle, vals);
-      
-      #save weights each cycle
-      rnn.save("weights/weights-{}".format(cycle));
+         sys.stdout.flush();
+
+         if(pretrain_without_improvement >= max_trials):
+            print("No improvement during training.");
+            #break;
+
+         #update only last values
+         db.updateLearning(cycle, vals);
+
+         #save weights each cycle
+         rnn.save("weights/weights-{}".format(cycle));
 
       #increase the temperature each cycle
-      rnn.setTemperature(1.0 + 0.05*(cycle  -1));
+      rnn.setTemperature(1.0 + 0.05 * (cycle - 1) );
+      print("Start generation.");
 
-      print("Start generation for cycle ", cycle, ".");
-
-      for i in range(max_attempts):
+      for i in range(mtree_max):
          rnn_before();
-         #put here a fragment if you want to generate from a particular core
          rnn_generate("");
          rnn_after(cycle);
+
          db.commit();
          sys.stdout.flush();
-      #Finish feneration within the cycle.
 
       nt = db.averageTarget(cycle);
       print("Average value for cycle {} is {}".format(cycle, nt));
